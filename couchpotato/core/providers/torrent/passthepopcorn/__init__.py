@@ -8,9 +8,11 @@ config = [{
     'groups': [
         {
             'tab': 'searcher',
-            'subtab': 'torrent_providers',
+            'subtab': 'providers',
+            'list': 'torrent_providers',
             'name': 'PassThePopcorn',
             'description': 'See <a href="https://passthepopcorn.me">PassThePopcorn.me</a>',
+            'wizard': True,
             'options': [
                 {
                     'name': 'enabled',
@@ -31,6 +33,10 @@ config = [{
                     'name': 'password',
                     'default': '',
                     'type': 'password',
+                },
+                {
+                    'name': 'passkey',
+                    'default': '',
                 }
             ],
 }

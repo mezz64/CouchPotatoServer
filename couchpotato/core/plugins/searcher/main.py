@@ -3,7 +3,8 @@ from couchpotato.api import addApiView
 from couchpotato.core.event import addEvent, fireEvent, fireEventAsync
 from couchpotato.core.helpers.encoding import simplifyString, toUnicode
 from couchpotato.core.helpers.request import jsonified, getParam
-from couchpotato.core.helpers.variable import md5, getTitle
+from couchpotato.core.helpers.variable import md5, getTitle, splitString, \
+    possibleTitles
 from couchpotato.core.logger import CPLog
 from couchpotato.core.plugins.base import Plugin
 from couchpotato.core.settings.model import Movie, Release, ReleaseInfo
@@ -11,6 +12,7 @@ from couchpotato.environment import Env
 from inspect import ismethod, isfunction
 from sqlalchemy.exc import InterfaceError
 import datetime
+import random
 import re
 import time
 import traceback
@@ -82,37 +84,51 @@ class Searcher(Plugin):
         movies = db.query(Movie).filter(
             Movie.status.has(identifier = 'active')
         ).all()
+        random.shuffle(movies)
 
         self.in_progress = {
             'total': len(movies),
             'to_go': len(movies),
         }
 
-        for movie in movies:
-            movie_dict = movie.to_dict({
-                'profile': {'types': {'quality': {}}},
-                'releases': {'status': {}, 'quality': {}},
-                'library': {'titles': {}, 'files':{}},
-                'files': {}
-            })
+        try:
+            search_types = self.getSearchTypes()
 
-            try:
-                self.single(movie_dict)
-            except IndexError:
-                log.error('Forcing library update for %s, if you see this often, please report: %s', (movie_dict['library']['identifier'], traceback.format_exc()))
-                fireEvent('library.update', movie_dict['library']['identifier'], force = True)
-            except:
-                log.error('Search failed for %s: %s', (movie_dict['library']['identifier'], traceback.format_exc()))
+            for movie in movies:
+                movie_dict = movie.to_dict({
+                    'profile': {'types': {'quality': {}}},
+                    'releases': {'status': {}, 'quality': {}},
+                    'library': {'titles': {}, 'files':{}},
+                    'files': {}
+                })
 
-            self.in_progress['to_go'] -= 1
+                try:
+                    self.single(movie_dict, search_types)
+                except IndexError:
+                    log.error('Forcing library update for %s, if you see this often, please report: %s', (movie_dict['library']['identifier'], traceback.format_exc()))
+                    fireEvent('library.update', movie_dict['library']['identifier'], force = True)
+                except:
+                    log.error('Search failed for %s: %s', (movie_dict['library']['identifier'], traceback.format_exc()))
 
-            # Break if CP wants to shut down
-            if self.shuttingDown():
-                break
+                self.in_progress['to_go'] -= 1
+
+                # Break if CP wants to shut down
+                if self.shuttingDown():
+                    break
+
+        except SearchSetupError:
+            pass
 
         self.in_progress = False
 
-    def single(self, movie):
+    def single(self, movie, search_types = None):
+
+        # Find out search type
+        try:
+            if not search_types:
+                search_types = self.getSearchTypes()
+        except SearchSetupError:
+            return
 
         done_status = fireEvent('status.get', 'done', single = True)
 
@@ -127,6 +143,8 @@ class Searcher(Plugin):
         available_status = fireEvent('status.get', 'available', single = True)
         ignored_status = fireEvent('status.get', 'ignored', single = True)
 
+        found_releases = []
+
         default_title = getTitle(movie['library'])
         if not default_title:
             log.error('No proper info found for movie, removing it from library to cause it from having more issues.')
@@ -134,6 +152,7 @@ class Searcher(Plugin):
             return
 
         fireEvent('notify.frontend', type = 'searcher.started.%s' % movie['id'], data = True, message = 'Searching for "%s"' % default_title)
+
 
         ret = False
         for quality_type in movie['profile']['types']:
@@ -154,7 +173,11 @@ class Searcher(Plugin):
                 log.info('Search for %s in %s', (default_title, quality_type['quality']['label']))
                 quality = fireEvent('quality.single', identifier = quality_type['quality']['identifier'], single = True)
 
-                results = fireEvent('yarr.search', movie, quality, merge = True)
+                results = []
+                for search_type in search_types:
+                    type_results = fireEvent('%s.search' % search_type, movie, quality, merge = True)
+                    if type_results:
+                        results += type_results
 
                 sorted_results = sorted(results, key = lambda k: k['score'], reverse = True)
                 if len(sorted_results) == 0:
@@ -171,10 +194,13 @@ class Searcher(Plugin):
                 # Add them to this movie releases list
                 for nzb in sorted_results:
 
-                    rls = db.query(Release).filter_by(identifier = md5(nzb['url'])).first()
+                    nzb_identifier = md5(nzb['url'])
+                    found_releases.append(nzb_identifier)
+
+                    rls = db.query(Release).filter_by(identifier = nzb_identifier).first()
                     if not rls:
                         rls = Release(
-                            identifier = md5(nzb['url']),
+                            identifier = nzb_identifier,
                             movie_id = movie.get('id'),
                             quality_id = quality_type.get('quality_id'),
                             status_id = available_status.get('id')
@@ -204,6 +230,10 @@ class Searcher(Plugin):
 
 
                 for nzb in sorted_results:
+                    if not quality_type.get('finish', False) and quality_type.get('wait_for', 0) > 0 and nzb.get('age') <= quality_type.get('wait_for', 0):
+                        log.info('Ignored, waiting %s days: %s', (quality_type.get('wait_for'), nzb['name']))
+                        continue
+
                     if nzb['status_id'] == ignored_status.get('id'):
                         log.info('Ignored: %s', nzb['name'])
                         continue
@@ -218,6 +248,12 @@ class Searcher(Plugin):
                         break
                     elif downloaded != 'try_next':
                         break
+
+                # Remove releases that aren't found anymore
+                for release in movie.get('releases', []):
+                    if release.get('status_id') == available_status.get('id') and release.get('identifier') not in found_releases:
+                        fireEvent('release.delete', release.get('id'), single = True)
+
             else:
                 log.info('Better quality (%s) already available or snatched for %s', (quality_type['quality']['label'], default_title))
                 fireEvent('movie.restatus', movie['id'])
@@ -233,67 +269,93 @@ class Searcher(Plugin):
 
     def download(self, data, movie, manual = False):
 
-        snatched_status = fireEvent('status.get', 'snatched', single = True)
+        # Test to see if any downloaders are enabled for this type
+        downloader_enabled = fireEvent('download.enabled', manual, data, single = True)
 
-        # Download movie to temp
-        filedata = None
-        if data.get('download') and (ismethod(data.get('download')) or isfunction(data.get('download'))):
-            filedata = data.get('download')(url = data.get('url'), nzb_id = data.get('id'))
-            if filedata is 'try_next':
-                return filedata
+        if downloader_enabled:
 
-        successful = fireEvent('download', data = data, movie = movie, manual = manual, filedata = filedata, single = True)
+            snatched_status = fireEvent('status.get', 'snatched', single = True)
 
-        if successful:
+            # Download movie to temp
+            filedata = None
+            if data.get('download') and (ismethod(data.get('download')) or isfunction(data.get('download'))):
+                filedata = data.get('download')(url = data.get('url'), nzb_id = data.get('id'))
+                if filedata == 'try_next':
+                    return filedata
 
-            try:
-                # Mark release as snatched
-                db = get_session()
-                rls = db.query(Release).filter_by(identifier = md5(data['url'])).first()
-                if rls:
-                    rls.status_id = snatched_status.get('id')
-                    db.commit()
+            successful = fireEvent('download', data = data, movie = movie, manual = manual, filedata = filedata, single = True)
 
-                    log_movie = '%s (%s) in %s' % (getTitle(movie['library']), movie['library']['year'], rls.quality.label)
-                    snatch_message = 'Snatched "%s": %s' % (data.get('name'), log_movie)
-                    log.info(snatch_message)
-                    fireEvent('movie.snatched', message = snatch_message, data = rls.to_dict())
+            if successful:
 
-                # If renamer isn't used, mark movie done
-                if not Env.setting('enabled', 'renamer'):
-                    active_status = fireEvent('status.get', 'active', single = True)
-                    done_status = fireEvent('status.get', 'done', single = True)
-                    try:
-                        if movie['status_id'] == active_status.get('id'):
-                            for profile_type in movie['profile']['types']:
-                                if rls and profile_type['quality_id'] == rls.quality.id and profile_type['finish']:
-                                    log.info('Renamer disabled, marking movie as finished: %s', log_movie)
+                try:
+                    # Mark release as snatched
+                    db = get_session()
+                    rls = db.query(Release).filter_by(identifier = md5(data['url'])).first()
+                    if rls:
+                        rls.status_id = snatched_status.get('id')
+                        db.commit()
 
-                                    # Mark release done
-                                    rls.status_id = done_status.get('id')
-                                    db.commit()
+                        log_movie = '%s (%s) in %s' % (getTitle(movie['library']), movie['library']['year'], rls.quality.label)
+                        snatch_message = 'Snatched "%s": %s' % (data.get('name'), log_movie)
+                        log.info(snatch_message)
+                        fireEvent('movie.snatched', message = snatch_message, data = rls.to_dict())
 
-                                    # Mark movie done
-                                    mvie = db.query(Movie).filter_by(id = movie['id']).first()
-                                    mvie.status_id = done_status.get('id')
-                                    db.commit()
-                    except:
-                        log.error('Failed marking movie finished, renamer disabled: %s', traceback.format_exc())
+                    # If renamer isn't used, mark movie done
+                    if not Env.setting('enabled', 'renamer'):
+                        active_status = fireEvent('status.get', 'active', single = True)
+                        done_status = fireEvent('status.get', 'done', single = True)
+                        try:
+                            if movie['status_id'] == active_status.get('id'):
+                                for profile_type in movie['profile']['types']:
+                                    if rls and profile_type['quality_id'] == rls.quality.id and profile_type['finish']:
+                                        log.info('Renamer disabled, marking movie as finished: %s', log_movie)
 
-            except:
-                log.error('Failed marking movie finished: %s', traceback.format_exc())
+                                        # Mark release done
+                                        rls.status_id = done_status.get('id')
+                                        db.commit()
 
-            return True
+                                        # Mark movie done
+                                        mvie = db.query(Movie).filter_by(id = movie['id']).first()
+                                        mvie.status_id = done_status.get('id')
+                                        db.commit()
+                        except:
+                            log.error('Failed marking movie finished, renamer disabled: %s', traceback.format_exc())
 
-        log.info('Tried to download, but none of the downloaders are enabled')
+                except:
+                    log.error('Failed marking movie finished: %s', traceback.format_exc())
+
+                return True
+
+        log.info('Tried to download, but none of the "%s" downloaders are enabled', (data.get('type', '')))
+
         return False
+
+    def getSearchTypes(self):
+
+        download_types = fireEvent('download.enabled_types', merge = True)
+        provider_types = fireEvent('provider.enabled_types', merge = True)
+
+        if download_types and len(list(set(provider_types) & set(download_types))) == 0:
+            log.error('There aren\'t any providers enabled for your downloader (%s). Check your settings.', ','.join(download_types))
+            raise NoProviders
+
+        for useless_provider in list(set(provider_types) - set(download_types)):
+            log.debug('Provider for "%s" enabled, but no downloader.', useless_provider)
+
+        search_types = download_types
+
+        if len(search_types) == 0:
+            log.error('There aren\'t any downloaders enabled. Please pick one in settings.')
+            raise NoDownloaders
+
+        return search_types
 
     def correctMovie(self, nzb = {}, movie = {}, quality = {}, **kwargs):
 
         imdb_results = kwargs.get('imdb_results', False)
         retention = Env.setting('retention', section = 'nzb')
 
-        if nzb.get('seeds') is None and 0 < retention < nzb.get('age', 0):
+        if nzb.get('seeders') is None and 0 < retention < nzb.get('age', 0):
             log.info2('Wrong: Outside retention, age is %s, needs %s or lower: %s', (nzb['age'], retention, nzb['name']))
             return False
 
@@ -301,23 +363,28 @@ class Searcher(Plugin):
         movie_words = re.split('\W+', simplifyString(movie_name))
         nzb_name = simplifyString(nzb['name'])
         nzb_words = re.split('\W+', nzb_name)
-        required_words = [x.strip().lower() for x in self.conf('required_words').lower().split(',')]
+        required_words = splitString(self.conf('required_words').lower())
 
-        if self.conf('required_words') and not list(set(nzb_words) & set(required_words)):
+        req_match = 0
+        for req_set in required_words:
+            req = splitString(req_set, '&')
+            req_match += len(list(set(nzb_words) & set(req))) == len(req)
+
+        if self.conf('required_words') and req_match == 0:
             log.info2("Wrong: Required word missing: %s" % nzb['name'])
             return False
 
-        ignored_words = [x.strip().lower() for x in self.conf('ignored_words').split(',')]
-        blacklisted = list(set(nzb_words) & set(ignored_words))
+        ignored_words = splitString(self.conf('ignored_words').lower())
+        blacklisted = list(set(nzb_words) & set(ignored_words) - set(movie_words))
         if self.conf('ignored_words') and blacklisted:
             log.info2("Wrong: '%s' blacklisted words: %s" % (nzb['name'], ", ".join(blacklisted)))
             return False
 
         pron_tags = ['xxx', 'sex', 'anal', 'tits', 'fuck', 'porn', 'orgy', 'milf', 'boobs', 'erotica', 'erotic']
-        for p_tag in pron_tags:
-            if p_tag in nzb_words and p_tag not in movie_words:
-                log.info('Wrong: %s, probably pr0n', (nzb['name']))
-                return False
+        pron_words = list(set(nzb_words) & set(pron_tags) - set(movie_words))
+        if pron_words:
+            log.info('Wrong: %s, probably pr0n', (nzb['name']))
+            return False
 
         #qualities = fireEvent('quality.all', single = True)
         preferred_quality = fireEvent('quality.single', identifier = quality['identifier'], single = True)
@@ -353,20 +420,21 @@ class Searcher(Plugin):
             return True
 
         # Check if nzb contains imdb link
-        if self.checkIMDB([nzb['description']], movie['library']['identifier']):
+        if self.checkIMDB([nzb.get('description', '')], movie['library']['identifier']):
             return True
 
-        for movie_title in movie['library']['titles']:
-            movie_words = re.split('\W+', simplifyString(movie_title['title']))
+        for raw_title in movie['library']['titles']:
+            for movie_title in possibleTitles(raw_title['title']):
+                movie_words = re.split('\W+', simplifyString(movie_title))
 
-            if self.correctName(nzb['name'], movie_title['title']):
-                # if no IMDB link, at least check year range 1
-                if len(movie_words) > 2 and self.correctYear([nzb['name']], movie['library']['year'], 1):
-                    return True
+                if self.correctName(nzb['name'], movie_title):
+                    # if no IMDB link, at least check year range 1
+                    if len(movie_words) > 2 and self.correctYear([nzb['name']], movie['library']['year'], 1):
+                        return True
 
-                # if no IMDB link, at least check year
-                if len(movie_words) <= 2 and self.correctYear([nzb['name']], movie['library']['year'], 0):
-                    return True
+                    # if no IMDB link, at least check year
+                    if len(movie_words) <= 2 and self.correctYear([nzb['name']], movie['library']['year'], 0):
+                        return True
 
         log.info("Wrong: %s, undetermined naming. Looking for '%s (%s)'" % (nzb['name'], movie_name, movie['library']['year']))
         return False
@@ -388,6 +456,11 @@ class Searcher(Plugin):
             # Alt in words
             if list(set(nzb_words) & set(quality['alternative'])):
                 found[quality['identifier']] = True
+
+        # Try guessing via quality tags
+        guess = fireEvent('quality.guess', [nzb.get('name')], single = True)
+        if guess:
+            found[guess['identifier']] = True
 
         # Hack for older movies that don't contain quality tag
         year_name = fireEvent('scanner.name_year', name, single = True)
@@ -430,12 +503,16 @@ class Searcher(Plugin):
     def correctName(self, check_name, movie_name):
 
         check_names = [check_name]
-        try:
-            check_names.append(re.search(r'([\'"])[^\1]*\1', check_name).group(0))
-        except:
-            pass
 
-        for check_name in check_names:
+        # Match names between "
+        try: check_names.append(re.search(r'([\'"])[^\1]*\1', check_name).group(0))
+        except: pass
+
+        # Match longest name between []
+        try: check_names.append(max(check_name.split('['), key = len))
+        except: pass
+
+        for check_name in list(set(check_names)):
             check_movie = fireEvent('scanner.name_year', check_name, single = True)
 
             try:
@@ -516,3 +593,12 @@ class Searcher(Plugin):
         except:
             log.error('Failed searching for next release: %s', traceback.format_exc())
             return False
+
+class SearchSetupError(Exception):
+    pass
+
+class NoDownloaders(SearchSetupError):
+    pass
+
+class NoProviders(SearchSetupError):
+    pass

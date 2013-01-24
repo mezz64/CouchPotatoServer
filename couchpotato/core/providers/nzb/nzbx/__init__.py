@@ -1,16 +1,18 @@
-from .main import Mysterbin
+from .main import Nzbx
 
 def start():
-    return Mysterbin()
+    return Nzbx()
 
 config = [{
-    'name': 'mysterbin',
+    'name': 'nzbx',
     'groups': [
         {
             'tab': 'searcher',
-            'subtab': 'nzb_providers',
-            'name': 'Mysterbin',
-            'description': 'Free provider, less accurate. See <a href="https://www.mysterbin.com/">Mysterbin</a>',
+            'subtab': 'providers',
+            'list': 'nzb_providers',
+            'name': 'nzbX',
+            'description': 'Free provider. See <a href="https://www.nzbx.co/">nzbX</a>',
+            'wizard': True,
             'options': [
                 {
                     'name': 'enabled',

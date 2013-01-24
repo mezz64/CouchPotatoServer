@@ -1,21 +1,23 @@
-from .main import Newzbin
+from .main import TorrentDay
 
 def start():
-    return Newzbin()
+    return TorrentDay()
 
 config = [{
-    'name': 'newzbin',
+    'name': 'torrentday',
     'groups': [
         {
             'tab': 'searcher',
-            'subtab': 'nzb_providers',
-            'name': 'newzbin',
-            'description': 'See <a href="https://www.newzbin2.es/">Newzbin</a>',
+            'subtab': 'providers',
+            'list': 'torrent_providers',
+            'name': 'TorrentDay',
+            'description': 'See <a href="http://www.td.af/">TorrentDay</a>',
             'wizard': True,
             'options': [
                 {
                     'name': 'enabled',
                     'type': 'enabler',
+                    'default': False,
                 },
                 {
                     'name': 'username',

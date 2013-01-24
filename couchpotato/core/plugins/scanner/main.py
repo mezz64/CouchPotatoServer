@@ -89,7 +89,7 @@ class Scanner(Plugin):
         '()([ab])(\.....?)$' #*a.mkv
     ]
 
-    cp_imdb = '(\.cp\((?P<id>tt[0-9{7}]+)\))'
+    cp_imdb = '(.cp.(?P<id>tt[0-9{7}]+).)'
 
     def __init__(self):
 
@@ -341,7 +341,7 @@ class Scanner(Plugin):
                 group['files']['movie'] = self.getMediaFiles(group['unsorted_files'])
 
             if len(group['files']['movie']) == 0:
-                log.error('Couldn\t find any movie files for %s', identifier)
+                log.error('Couldn\'t find any movie files for %s', identifier)
                 continue
 
             log.debug('Getting metadata for %s', identifier)
@@ -421,7 +421,7 @@ class Scanner(Plugin):
         if not data['quality']:
             data['quality'] = fireEvent('quality.single', 'dvdr' if group['is_dvd'] else 'dvdrip', single = True)
 
-        data['quality_type'] = 'HD' if data.get('resolution_width', 0) >= 1280 else 'SD'
+        data['quality_type'] = 'HD' if data.get('resolution_width', 0) >= 1280 or data['quality'].get('hd') else 'SD'
 
         filename = re.sub('(.cp\(tt[0-9{7}]+\))', '', files[0])
         data['group'] = self.getGroup(filename[len(folder):])
@@ -775,7 +775,7 @@ class Scanner(Plugin):
         return None
 
     def findYear(self, text):
-        matches = re.search('(?P<year>[12]{1}[0-9]{3})', text)
+        matches = re.search('(?P<year>19[0-9]{2}|20[0-9]{2})', text)
         if matches:
             return matches.group('year')
 

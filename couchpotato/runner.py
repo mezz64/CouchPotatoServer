@@ -212,7 +212,7 @@ def runCouchPotato(options, base_path, args, data_dir = None, log_dir = None, En
     config = {
         'use_reloader': reloader,
         'port': tryInt(Env.setting('port', default = 5000)),
-        'host': Env.setting('host', default = ''),
+        'host': Env.setting('host', default = "0.0.0.0"),
         'ssl_cert': Env.setting('ssl_cert', default = None),
         'ssl_key': Env.setting('ssl_key', default = None),
     }
@@ -259,7 +259,7 @@ def runCouchPotato(options, base_path, args, data_dir = None, log_dir = None, En
 
     while try_restart:
         try:
-            server.listen(config['port'])
+            server.listen(config['port'], config['host'])
             loop.start()
         except Exception, e:
             try:
